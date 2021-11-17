@@ -9,12 +9,21 @@ def debug_parse_instruction(inst)
   puts inst.ljust(100) + Parser.parse_instruction(inst).inspect
 end
 
-context = { classes: {} }
 
-Stdlib.setup(context)
+def load_program(source_glob)
+  context = { classes: {} }
 
-Dir["source/**/*.smali"].each do |f|
-  Loader.load_file(f, context)
+  Stdlib.setup(context)
+
+  Dir[source_glob].each do |f|
+    Loader.load_file(f, context)
+  end
+
+  context
+end
+
+def new_runtime
+  { classes: {}, locks: [] }
 end
 
 def convert_to_bool(value)
@@ -35,8 +44,6 @@ def test_zero(value)
   end
 end
 
-
-run_context = { classes: {}, locks: [] }
 
 JavaObject = Struct.new(:name, :value)
 def new_object(context, run_context, klass)
@@ -448,4 +455,3 @@ def run(context, run_context, class_name, method_name, this = nil, args = [])
 
   run_context[:return] = nil
 end
-
