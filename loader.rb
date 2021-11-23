@@ -61,6 +61,7 @@ end
 
 class FieldDirective < Directive
   def modifiers
+    words[1...-1]
   end
 
   def name
@@ -69,6 +70,12 @@ class FieldDirective < Directive
 
   def type
     words[-1].split(":").last
+  end
+end
+
+class PackedSwitchDirective < Directive
+  def starting_value
+    words[1].to_i(16)
   end
 end
 
@@ -103,6 +110,8 @@ def directive(line)
     RegistersDirective.new(line)
   when "field"
     FieldDirective.new(line)
+  when "packed-switch"
+    PackedSwitchDirective.new(line)
   end
 end
 
@@ -118,9 +127,11 @@ end
 
 
 class JavaMethod
-  attr_reader :name, :modifiers, :return_type, :params
-  attr_reader :labels, :instructions, :registers
-  def initialize(obj)
+  attr_reader :class_name, :name, :modifiers, :return_type, :params
+  attr_reader :labels, :instructions, :registers, :switches
+  attr_reader :ruby_code
+  def initialize(class_name, obj)
+    @class_name = class_name
     @name = obj.name
     @modifiers = obj.modifiers
     @return_type = obj.return_type
@@ -128,6 +139,11 @@ class JavaMethod
 
     @labels = {}
     @instructions = []
+    @switches = {}
+  end
+
+  def set_ruby_code(block)
+    @ruby_code = block
   end
 
   def set_registers(count)
@@ -142,11 +158,17 @@ class JavaMethod
     @instructions << inst
   end
 
+  def add_switch(switch)
+    @switches[switch[:name]] = switch
+  end
+
   def signature
     "#{modifiers.join(" ")} #{name}(#{params})#{return_type}"
   end
 
   def match?(name, this, args)
+    #pp [name, this.nil?, args]
+    #pp [self.name, self.modifiers.include?("static"), self.params]
     return false if name != self.name
     return false if this.nil? != self.modifiers.include?("static")
     return false if args.count != self.params.count
@@ -165,6 +187,8 @@ module Loader
 
     current_class = nil
     current_method = nil
+    current_switch = false
+    last_label = nil
     lines.each do |line|
       d = parse(line)
       case d
@@ -179,21 +203,36 @@ module Loader
         current_class[:super] = d.name
       when FieldDirective
         current_class[:fields][d.name] = {
+          class: current_class[:name],
           name: d.name,
           modifiers: d.modifiers,
           type: d.type,
         }
       when MethodDirective
-        current_method = JavaMethod.new(d)
+        current_method = JavaMethod.new(current_class[:name], d)
         current_class[:methods] << current_method
       when EndDirective
         if d.what == "method" && current_method
           current_method = nil
+        elsif d.what == "packed-switch" && current_switch
+          current_switch = nil
         end
+      when PackedSwitchDirective
+        current_switch = {
+          name: last_label,
+          starting_value: d.starting_value,
+          labels: [],
+        }
+        current_method.add_switch(current_switch)
       when RegistersDirective
         current_method.set_registers(d.count)
       when Label
-        current_method.add_label(d.name)
+        if current_switch
+          current_switch[:labels] << d.name
+        else
+          current_method.add_label(d.name)
+          last_label = d.name
+        end
       when Instruction
         if current_method
           current_method.add_instruction(d)
