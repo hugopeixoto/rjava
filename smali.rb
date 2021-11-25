@@ -10,8 +10,8 @@ def debug_parse_instruction(inst)
 end
 
 
-def load_program(source_glob)
-  context = { classes: {} }
+def load_program(source_glob, package_name, apk_location)
+  context = { classes: {}, package_name: package_name, apk_location: apk_location }
 
   Stdlib.setup(context)
 
@@ -230,7 +230,11 @@ end
 def get_instance_field(context, run_context, identifier, this, depth)
   raise "expected field identifier, got #{identifier}" unless identifier.is_a?(Objects::FieldIdentifier)
 
+  raise "Class definition not found: #{identifier.class}" unless context[:classes][identifier.class]
+
   field = context[:classes][identifier.class][:fields][identifier.name]
+
+  raise "Field definition not found: #{identifier.name}" unless field
 
   raise "field must be not static" if field[:modifiers].include?("static")
 
@@ -261,7 +265,12 @@ end
 def get_static_field(context, run_context, identifier, depth)
   raise "expected static field identifier, got #{identifier}" unless identifier.is_a?(Objects::FieldIdentifier)
 
+  raise "Class definition not found: #{identifier.class}" unless context[:classes][identifier.class]
+
   initialize_class(context, run_context, identifier.class, depth + 1)
+
+  field = context[:classes][identifier.class][:fields][identifier.name]
+  raise "Field definition not found: #{identifier.name}" unless field
 
   run_context[:classes][identifier.class][:fields][identifier.name]
 end
@@ -289,11 +298,13 @@ class MethodLookup < Struct.new(:context, :run_context)
     raise "class not found: #{identifier.class}" unless context[:classes].key?(identifier.class)
 
     while class_name
-      method = context[:classes][class_name][:methods]
-        .reject { |m| m.modifiers.include?("static") }
-        .find { |m| m.name == identifier.name && m.params == args }
+      methods = context[:classes][class_name][:methods]
+        #.reject { |m| m.modifiers.include?("static") }
+        .select { |m| m.name == identifier.name && m.params == args }
 
-      return method if method
+      raise if methods.count > 1
+
+      return methods.first if methods.count > 0
 
       class_name = context[:classes][class_name][:super]
     end
@@ -328,7 +339,7 @@ end
 
 $debug = false
 def run(context, run_context, method, this, args, depth = 0)
-  puts " "*(depth*2) + "calling #{method.class_name}.#{method.name} with #{this} and #{args}"
+  #puts " "*(depth*2) + "calling #{method.class_name}.#{method.name} with #{this} and #{args}"
 
   this = nil if method.modifiers.include?("static")
   initialize_class(context, run_context, this.name, depth + 1) if this
@@ -457,6 +468,31 @@ def run(context, run_context, method, this, args, depth = 0)
 
         run(context, run_context, submethod, nil, values, depth + 1)
 
+      when "invoke-interface"
+        identifier = Objects.parse(inst.args[1])
+
+        raise unless identifier.is_a?(Objects::MethodIdentifier)
+
+        values = inst.args[0].map { |arg| Objects.parse(arg) }
+        values = values.map { |arg| read_value(registers, parameters, arg) }
+
+        obj, *args = values
+
+        submethod = MethodLookup.new(context, run_context).lookup_virtual(obj, identifier)
+        run(context, run_context, submethod, obj, args, depth + 1)
+      when "invoke-interface/range"
+        identifier = Objects.parse(inst.args[1])
+
+        raise unless identifier.is_a?(Objects::MethodIdentifier)
+
+        values = Objects.parse(inst.args[0]).registers
+        values = values.map { |arg| read_value(registers, parameters, arg) }
+
+        obj, *args = values
+
+        submethod = MethodLookup.new(context, run_context).lookup_virtual(obj, identifier)
+        run(context, run_context, submethod, obj, args, depth + 1)
+
       when "sput-object"
         value = Objects.parse(inst.args[0])
         identifier = Objects.parse(inst.args[1])
@@ -526,7 +562,7 @@ def run(context, run_context, method, this, args, depth = 0)
         value = read_value(registers, parameters, value)
         this = read_value(registers, parameters, this)
 
-        raise "iput needs an object, got #{value}" unless value.is_a?(JavaObject)
+        raise "iput-object needs an object, got #{value}" unless value.is_a?(JavaObject) || value.is_a?(Objects::Array)
 
         set_instance_field(context, run_context, identifier, this, value, depth)
 
@@ -565,7 +601,7 @@ def run(context, run_context, method, this, args, depth = 0)
         this = read_value(registers, parameters, this)
         value = get_instance_field(context, run_context, identifier, this, depth)
 
-        raise "iput needs an object, got #{value}" unless value.is_a?(JavaObject)
+        raise "iget needs an object, got #{value}" unless value.is_a?(JavaObject) || value.is_a?(Objects::Array)
 
         registers.set(target, value)
 
@@ -575,9 +611,9 @@ def run(context, run_context, method, this, args, depth = 0)
 
         value = read_value(registers, parameters, value)
 
-        raise "#{inst.inspect}: expected 32b number, got #{value}" unless value.is_a?(Objects::Integer)
+        raise "#{inst.inspect}: expected 32b number, got #{value}" unless value.is_a?(Objects::Integer) || value.is_a?(JavaObject)
 
-        if value.value != 0
+        if value.is_a?(JavaObject) || value.value != 0
           ip = method.labels[label.name] - 1
         end
 
@@ -605,6 +641,20 @@ def run(context, run_context, method, this, args, depth = 0)
           ip = method.labels[label.name] - 1
         end
 
+      when "if-lt"
+        a = Objects.parse(inst.args[0])
+        b = Objects.parse(inst.args[1])
+        label = Objects.parse(inst.args[2])
+
+        a = read_value(registers, parameters, a)
+        b = read_value(registers, parameters, b)
+
+        raise "#{inst.inspect}: expected 32b number, got #{a}" unless a.is_a?(Objects::Integer)
+        raise "#{inst.inspect}: expected 32b number, got #{b}" unless b.is_a?(Objects::Integer)
+
+        if a.value < b.value
+          ip = method.labels[label.name] - 1
+        end
       when "if-ge"
         a = Objects.parse(inst.args[0])
         b = Objects.parse(inst.args[1])
@@ -665,7 +715,7 @@ def run(context, run_context, method, this, args, depth = 0)
         target = Objects.parse(inst.args[0])
         value = Objects.parse(inst.args[1])
 
-        long = value = read_value_wide(registers, parameters, value)
+        value = read_value_wide(registers, parameters, value)
         value = value.shorten
 
         registers.set(target, value)
@@ -677,6 +727,14 @@ def run(context, run_context, method, this, args, depth = 0)
         value.value = [value.value].pack('l!<')[0...2].unpack('s!<').first
 
         registers.set(target, value)
+      when "int-to-long"
+        target = Objects.parse(inst.args[0])
+        value = Objects.parse(inst.args[1])
+
+        value = read_value(registers, parameters, value)
+        value = value.widen
+
+        registers.set_wide(target, value)
 
       when "xor-int"
         binop(inst, 'III', registers, parameters) { |a, b| a ^ b }
@@ -729,6 +787,8 @@ def run(context, run_context, method, this, args, depth = 0)
         binop_lit8(inst, 'III', registers, parameters) { |a, b| a.remainder(b) }
       when "rem-int/lit16"
         binop_lit8(inst, 'III', registers, parameters) { |a, b| a.remainder(b) }
+      when "rem-int/2addr"
+        binop_2addr(inst, 'II', registers, parameters) { |a, b| a.remainder(b) }
 
       when "shl-int/lit8"
         binop_lit8(inst, 'III', registers, parameters) { |a, b|
@@ -806,7 +866,7 @@ def run(context, run_context, method, this, args, depth = 0)
         value = Objects.parse(inst.args[0])
         value = read_value(registers, parameters, value)
 
-        raise "#{inst.inspect}: value is not an object: #{value}" unless value.is_a?(JavaObject)
+        raise "#{inst.inspect}: value is not an object: #{value}" unless value.is_a?(JavaObject) || value.is_a?(Objects::Array)
 
         #puts " " * (depth * 2) + "#{inst.inspect}: returning #{value.inspect}"
 
@@ -849,7 +909,7 @@ def run(context, run_context, method, this, args, depth = 0)
         target = Objects.parse(inst.args[0])
         value = run_context.fetch(:return)
 
-        raise "#{inst.inspect}: value is not an object: #{value}" unless value.is_a?(JavaObject)
+        raise "#{inst.inspect}: value is not an object: #{value}" unless value.is_a?(JavaObject) || value.is_a?(Objects::Array)
 
         registers.set(target, value)
 
@@ -892,6 +952,15 @@ def run(context, run_context, method, this, args, depth = 0)
 
         registers.set(target, array)
 
+      when "fill-array-data"
+        target = Objects.parse(inst.args[0])
+        label = Objects.parse(inst.args[1])
+
+        target = read_value(registers, parameters, target)
+        array = method.arrays.fetch(label.name)
+
+        target.set_values(array[:items].map { |elem| Objects::Integer.new(elem) })
+
       when 'packed-switch'
         value = Objects.parse(inst.args[0])
         label = Objects.parse(inst.args[1])
@@ -909,7 +978,7 @@ def run(context, run_context, method, this, args, depth = 0)
 
         target = read_value(registers, parameters, target)
 
-        raise "wip: exceptions not implemented" unless target.is_a?(JavaObject) && target.name == type
+        raise "wip: exceptions not implemented: #{class_ancestry(context, run_context, target)} vs #{type}" unless (target.is_a?(JavaObject) || target.is_a?(Objects::Array)) && class_ancestry(context, run_context, target).include?(type)
       else
         raise "unknown instruction: #{inst.inspect}"
       end
@@ -920,4 +989,18 @@ def run(context, run_context, method, this, args, depth = 0)
     raise "no return: #{method.return_type}" if method.return_type != 'V'
     run_context[:return] = nil
   end
+end
+
+def class_ancestry(context, run_context, target)
+  ancestry = []
+  name = target.name
+
+  return [name] if name.start_with?("[")
+
+  while name
+    ancestry << name
+    name = context[:classes].fetch(name)[:super]
+  end
+
+  ancestry
 end

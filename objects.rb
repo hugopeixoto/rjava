@@ -11,7 +11,14 @@ module Objects
     end
   end
 
-  RegisterRange = Struct.new(:begin, :end)
+  RegisterRange = Struct.new(:begin, :end) do
+    def registers
+      (self.begin..self.end).map do |index|
+        Register.new(index)
+      end
+    end
+  end
+
   Parameter = Struct.new(:index) do
     def next
       Parameter.new(index + 1)
@@ -37,6 +44,10 @@ module Objects
 
     def to_bits
       [value].pack("l>").unpack("B*").first
+    end
+
+    def smali_type
+      'I'
     end
   end
 
@@ -66,14 +77,24 @@ module Objects
     when 'D' then Long.zero
     when 'Ljava/lang/String;' then JavaObject.new(type, { contents: "" })
     when 'V' then raise
-    else nil
+    else
+      if type[0] == '['
+        Array.new(type[1..], 0)
+      else
+        nil
+      end
     end
   end
 
   class Array
     attr_reader :type, :values
     def initialize(type, length)
+      @type = type
       @values = [Objects.nil_value(type)] * length
+    end
+
+    def name
+      "[#{type}"
     end
 
     def length
@@ -85,6 +106,12 @@ module Objects
       raise "array index overflow: #{index}/#{length}" if index >= length
 
       @values[index] = value
+    end
+
+    def set_values(values)
+      values.each_with_index do |v, i|
+        set(i, v)
+      end
     end
   end
 
@@ -187,7 +214,7 @@ module Objects
       raise "Error accessing parameter: #{parameter} is not a parameter" unless parameter.is_a?(Parameter)
       raise "Error accessing parameter: #{parameter.index} is out of bounds" unless parameter.index < contents.size
 
-      raise "Can't store #{value} in a parameter" unless value.is_a?(Integer) || value.is_a?(JavaObject)
+      raise "Can't store #{value} in a parameter" unless value.is_a?(Integer) || value.is_a?(JavaObject) || value.is_a?(Array)
 
       contents[parameter.index] = value
     end
@@ -214,5 +241,12 @@ module Objects
       set(parameter, Integer.new(hi))
       set(parameter.next, Integer.new(lo))
     end
+  end
+
+  False = Objects::Integer.new(0)
+  True = Objects::Integer.new(1)
+
+  def self.new_string(contents)
+    JavaObject.new("Ljava/lang/String;", { contents: contents })
   end
 end

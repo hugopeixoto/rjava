@@ -1,3 +1,15 @@
+#   .annotation system Ldalvik/annotation/Throws;
+#       value = {
+#           Ljava/lang/Exception;
+#       }
+#   .end annotation
+
+# not sure what t means here. Maybe tiny?
+# .array-data 1
+# 0x2dt
+# -0x48t
+#.end array-data
+
 class Directive
   attr_reader :words
   def initialize(line)
@@ -79,6 +91,22 @@ class PackedSwitchDirective < Directive
   end
 end
 
+class AnnotationDirective < Directive
+  def x
+    words[1...-1]
+  end
+
+  def y
+    words[-1]
+  end
+end
+
+class ArrayDataDirective < Directive
+  def byte_size
+    words[-1].to_i
+  end
+end
+
 class Label < Struct.new(:name); end
 class Instruction
   attr_reader :params
@@ -112,6 +140,10 @@ def directive(line)
     FieldDirective.new(line)
   when "packed-switch"
     PackedSwitchDirective.new(line)
+  when "annotation"
+    AnnotationDirective.new(line)
+  when "array-data"
+    ArrayDataDirective.new(line)
   end
 end
 
@@ -128,7 +160,7 @@ end
 
 class JavaMethod
   attr_reader :class_name, :name, :modifiers, :return_type, :params
-  attr_reader :labels, :instructions, :registers, :switches
+  attr_reader :labels, :instructions, :registers, :switches, :arrays
   attr_reader :ruby_code
   def initialize(class_name, obj)
     @class_name = class_name
@@ -140,6 +172,7 @@ class JavaMethod
     @labels = {}
     @instructions = []
     @switches = {}
+    @arrays = {}
   end
 
   def set_ruby_code(block)
@@ -162,8 +195,12 @@ class JavaMethod
     @switches[switch[:name]] = switch
   end
 
+  def add_array(array)
+    @arrays[array[:name]] = array
+  end
+
   def signature
-    "#{modifiers.join(" ")} #{name}(#{params})#{return_type}"
+    "#{modifiers.join(" ")} #{name}(#{params.join("")})#{return_type}"
   end
 
   def match?(name, this, args)
@@ -188,6 +225,8 @@ module Loader
     current_class = nil
     current_method = nil
     current_switch = false
+    current_annotation = nil
+    current_array = nil
     last_label = nil
     lines.each do |line|
       d = parse(line)
@@ -216,6 +255,10 @@ module Loader
           current_method = nil
         elsif d.what == "packed-switch" && current_switch
           current_switch = nil
+        elsif d.what == "annotation" && current_annotation
+          current_annotation = nil
+        elsif d.what == "array-data" && current_array
+          current_array = nil
         end
       when PackedSwitchDirective
         current_switch = {
@@ -224,6 +267,14 @@ module Loader
           labels: [],
         }
         current_method.add_switch(current_switch)
+      when AnnotationDirective
+        current_annotation = []
+      when ArrayDataDirective
+        current_array = {
+          name: last_label,
+          items: [],
+        }
+        current_method.add_array(current_array)
       when RegistersDirective
         current_method.set_registers(d.count)
       when Label
@@ -234,7 +285,13 @@ module Loader
           last_label = d.name
         end
       when Instruction
-        if current_method
+        if current_annotation
+          # wip
+        elsif current_array
+          value = d.name.to_i(16)
+          # bounds check
+          current_array[:items] << value
+        else
           current_method.add_instruction(d)
         end
       else
